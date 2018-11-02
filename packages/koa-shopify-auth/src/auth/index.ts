@@ -1,3 +1,5 @@
+import {readFileSync} from 'fs';
+import {join} from 'path';
 import {Context} from 'koa';
 
 import {OAuthStartOptions, AccessMode, NextFunction} from '../types';
@@ -10,8 +12,12 @@ import createTopLevelOAuthRedirect from './create-top-level-oauth-redirect';
 const DEFAULT_MYSHOPIFY_DOMAIN = 'myshopify.com';
 const DEFAULT_ACCESS_MODE: AccessMode = 'online';
 
-export const TOP_LEVEL_OAUTH_COOKIE_NAME = 'shopifyTopLevelOAuth';
-export const TEST_COOKIE_NAME = 'shopifyTestCookie';
+export const TOP_LEVEL_OAUTH_COOKIE_NAME = 'shopify.top_level_oauth';
+export const TEST_COOKIE_NAME = 'shopify.cookies_persist';
+
+export function readTemplate(fname: string) {
+  return readFileSync(join(__dirname, '../../client', `${fname}.js`)).toString();
+}
 
 function hasCookieAccess({cookies}: Context) {
   return Boolean(cookies.get(TEST_COOKIE_NAME));
@@ -19,6 +25,24 @@ function hasCookieAccess({cookies}: Context) {
 
 function shouldPerformInlineOAuth({cookies}: Context) {
   return Boolean(cookies.get(TOP_LEVEL_OAUTH_COOKIE_NAME));
+}
+
+function userAgentCanPartitionCookies(context: Context) {
+  return context.request.header['user-agent'].match(
+    /Version\/12\.0\.?\d? Safari/,
+  );
+}
+
+function shouldRequestStorage(ctx: Context) {
+  if (ctx.query.top_level) {
+    return false;
+  }
+
+  if (!ctx.request.header['user-agent'].match(/Safari/)) {
+    return false;
+  }
+
+  return !ctx.cookies.get('shopify.granted_storage_access');
 }
 
 export default function createShopifyAuth(options: OAuthStartOptions) {
@@ -42,12 +66,39 @@ export default function createShopifyAuth(options: OAuthStartOptions) {
   const topLevelOAuthRedirect = createTopLevelOAuthRedirect(inlineOAuthPath);
 
   const enableCookiesPath = `${oAuthStartPath}/enable_cookies`;
-  const enableCookies = createEnableCookies(config);
+  const enableCookies = createEnableCookies(
+    config,
+    readTemplate('enable-cookies'),
+  );
   const enableCookiesRedirect = createEnableCookiesRedirect(enableCookiesPath);
 
+  const topLevelInteractionPath = `${prefix}/auth/top_level_interaction`;
+  const topLevelInteraction = createEnableCookies(
+    config,
+    readTemplate('top-level'),
+  );
+
+  const requestStorageAccessPath = `${prefix}/auth/request_storage`;
+  const requestStorage = createEnableCookies(
+    config,
+    readTemplate('request-storage'),
+  );
+
   return async function shopifyAuth(ctx: Context, next: NextFunction) {
-    if (ctx.path === oAuthStartPath && !hasCookieAccess(ctx)) {
+    ctx.state.authRoute = oAuthStartPath;
+
+    if (
+      ctx.path === oAuthStartPath &&
+      userAgentCanPartitionCookies(ctx) &&
+      !hasCookieAccess(ctx)
+    ) {
       await enableCookiesRedirect(ctx);
+      return;
+    }
+
+    console.log('request storage: ' + shouldRequestStorage(ctx));
+    if (ctx.path === oAuthStartPath && shouldRequestStorage(ctx)) {
+      await requestStorage(ctx);
       return;
     }
 
@@ -74,9 +125,27 @@ export default function createShopifyAuth(options: OAuthStartOptions) {
       return;
     }
 
+    if (ctx.path === topLevelInteractionPath) {
+      await topLevelInteraction(ctx);
+      return;
+    }
+
+    if (ctx.path === requestStorageAccessPath) {
+      await requestStorage(ctx);
+      return;
+    }
+
     await next();
   };
 }
+    // if (navigator.userAgent.indexOf('com.jadedpixel.pos') !== -1) {
+    //   return false;
+    // }
+
+    // if (navigator.userAgent.indexOf('Shopify Mobile/iOS') !== -1) {
+    //   return false;
+    // }
+
 
 export {default as Error} from './errors';
 export {default as validateHMAC} from './validate-hmac';
